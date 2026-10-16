@@ -1,0 +1,9 @@
+.hwa-settings, .hwa-workbench, .hwa-actions { display: grid; gap: 12px; max-height: 70vh; overflow-y: auto; padding: 4px; }
+.hwa-settings label { display: block; margin: 8px 0; }
+.hwa-settings label:has(input[type=checkbox]) { display: flex; gap: 8px; align-items: center; }
+.hwa-settings input[type=text], .hwa-settings select, .hwa-workbench select { width: 100%; }
+.hwa-tool-drop, .hwa-weapon-drop { border: 1px dashed var(--color-border-light-primary, #888); border-radius: 5px; padding: 12px; }
+.hwa-pattern { border-left: 3px solid #97713c; padding: 8px 12px; background: rgb(127 127 127 / 8%); }
+.hwa-pattern h3, .hwa-pattern p { margin: 5px 0; }
+.hwa-armor-list label { display: flex; gap: 8px; padding: 6px; align-items: center; }
+.hwa-chat p { margin: 6px 0; }

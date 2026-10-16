@@ -1,0 +1,8 @@
+{
+  "name": "the-horses-weapons-and-armor-expansion",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": { "check": "node tools/check.mjs", "test": "node --test tests/*.test.mjs", "package": "python tools/package.py" }
+}
