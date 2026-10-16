@@ -57,7 +57,7 @@ for (const group of ['ranged', 'melee']) {
     add(group, 'mercurian', 'Mercurian',
       'The weapon gains the thrown property with a range of 30/60 feet.',
       'If a thrown attack critically fails, the weapon is damaged until you spend 10 minutes repairing it with Weapon Tools.');
-    add(group, 'tsun-jin', 'Tsun-Jin', 'Increase this weapon\'s critical threat range by 1.',
+    add(group, 'tsun-jin', 'Tsun-Jin', 'This weapon critically hits on 19 or higher. This does not stack with other sources of expanded critical range; retain any lower threshold from another source.',
       'The critical threat range of attacks against you increases by 1 while this weapon is equipped.');
   }
 }
@@ -108,7 +108,7 @@ export function applyPatternModifiers(baseline, patternId) {
   }
   if (patternId === 'tsun-jin') {
     const threshold = Number.isFinite(result.criticalThreshold) ? result.criticalThreshold : 20;
-    result.criticalThreshold = Math.max(2, Math.min(20, threshold) - 1);
+    result.criticalThreshold = Math.max(2, Math.min(19, threshold));
   }
   return result;
 }

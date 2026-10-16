@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { MODULE_ID } from '../scripts/rules.js';
 import { conversionPlan, rerollCandidates, combatTurnKey, effectiveThreshold, configureAttack,
   configureDamage, evaluateDamage, blockedWeapon, naturalResult, criticalEventId,
-  isCriticalAttackDamage, afterDamage, registerCombat } from '../scripts/combat.js';
+  isCriticalAttackDamage, afterDamage, registerCombat, handleMidiAttack } from '../scripts/combat.js';
 
 function setPath(object, path, value) {
   const keys = path.split('.');
@@ -87,17 +87,19 @@ test('Phobos candidate detection excludes inactive dice, nonlinear formulas and 
   assert.equal(rerollCandidates([roll]).length, 0);
 });
 
-test('Tsun-Jin reduces an existing improved critical threshold and does not compound on repeated config renders', () => {
+test('Tsun-Jin caps the weapon threshold at 19 without stacking; defender drawback remains independent', () => {
   const { actor, activity } = fixture('tsun-jin');
-  assert.equal(effectiveThreshold(18, true, false), 17);
+  assert.equal(effectiveThreshold(20, true, false), 19);
+  assert.equal(effectiveThreshold(19, true, false), 19);
+  assert.equal(effectiveThreshold(18, true, false), 18);
   assert.equal(effectiveThreshold(20, true, true), 18);
   assert.equal(effectiveThreshold(2, true, true), 2);
   const config = { subject: activity, [MODULE_ID]: { targets: [] } }, roll = { options: { criticalSuccess: 18 } };
   configureAttack(config, roll); configureAttack(config, roll);
-  assert.equal(roll.options.criticalSuccess, 17);
+  assert.equal(roll.options.criticalSuccess, 18);
   config[MODULE_ID].targets = [actor];
   configureAttack(config, roll);
-  assert.equal(roll.options.criticalSuccess, 16);
+  assert.equal(roll.options.criticalSuccess, 17);
 });
 
 test('Mars adds one separate noncritical necrotic point without self damage or duplicate additions', () => {
@@ -308,4 +310,116 @@ test('automatic armor damage excludes NPCs, unowned actors, and playerless chara
   actor.hasPlayerOwner = true; actor.isOwner = false;
   await afterDamage(actor, 3, { origin: message });
   assert.equal(armor.updates.length, 0);
+});
+
+function midiWorkflow(activity, roll) {
+  const tracker = () => ({ get: { natural: true, forced: false, suppressed: false, override: undefined },
+    restore(state) { this.get = state; } });
+  return { activity, item: activity.item, attackRoll: roll, targets: new Set(), attackRollCount: 1,
+    attackRollModifierTracker: { critical: tracker(), fumble: tracker(), hasAdvantage: true, hasDisadvantage: false },
+    async setAttackRoll(replacement) { this.attackRoll = replacement; } };
+}
+
+test('Midi attack skips the unawaited core fumble hook and resolves once in its awaited hook', async () => {
+  const { state, item, activity } = fixture('accatran');
+  registerCombat();
+  const config = { subject: activity, workflow: { targets: new Set() } };
+  state.hooks.get('dnd5e.preRollAttack')(config);
+  const roll = { options: {}, d20: { results: [{ result: 1 }] } };
+  configureAttack(config, roll);
+  assert.equal(roll.options[MODULE_ID].midiWorkflow, true);
+  await state.hooks.get('dnd5e.postRollAttack')([roll], { subject: activity });
+  assert.equal(item.system.equipped, true);
+  const workflow = midiWorkflow(activity, roll);
+  await handleMidiAttack(workflow);
+  await handleMidiAttack(workflow);
+  assert.equal(item.system.equipped, false);
+  assert.equal(item.updates.length, 1);
+});
+
+test('Midi Kantreal retry replaces the same workflow before hit checks and preserves unrelated tracker state', async () => {
+  const { state, activity } = fixture('kantreal');
+  const original = { options: { attackMode: 'oneHanded', ammunition: 'ammo',
+    [MODULE_ID]: { midiWorkflow: true, nextAttack: { underwater: true } } }, d20: { results: [{ result: 1 }] } };
+  const replacement = { options: {}, d20: { results: [{ result: 17 }] } };
+  const workflow = midiWorkflow(activity, original);
+  workflow.attackRollModifierTracker.critical.get = { natural: false, forced: true, suppressed: true, override: false };
+  let resolved = false;
+  activity.rollAttack = async (config, _dialog, message) => {
+    assert.equal(config.workflow, undefined);
+    assert.equal(config[MODULE_ID].midiRetry, true);
+    assert.deepEqual(config[MODULE_ID].conditions, { underwater: true });
+    assert.equal(config.advantage, true);
+    assert.equal(config.disadvantage, false);
+    assert.equal(config.ammunition, 'ammo');
+    assert.equal(message.create, false);
+    await Promise.resolve();
+    resolved = true;
+    return [replacement];
+  };
+  state.random.push(11); state.choices.push('retry');
+  await handleMidiAttack(workflow);
+  assert.equal(resolved, true);
+  assert.equal(workflow.attackRoll, replacement);
+  assert.equal(replacement.options[MODULE_ID].midiWorkflow, true);
+  assert.equal(workflow.attackRollCount, 2);
+  assert.equal(workflow.attackRollModifierTracker.fumble.get.natural, false);
+  assert.deepEqual(workflow.attackRollModifierTracker.critical.get,
+    { natural: false, forced: true, suppressed: true, override: false });
+});
+
+test('Midi Kantreal confirmation ten retains failure and a retry fumble can jam before workflow continues', async () => {
+  const { state, item, activity } = fixture('kantreal');
+  const attack = () => ({ options: { [MODULE_ID]: { midiWorkflow: true } }, d20: { results: [{ result: 1 }] } });
+  const failed = midiWorkflow(activity, attack());
+  state.random.push(10);
+  await handleMidiAttack(failed);
+  assert.equal(state.retry, undefined);
+  assert.equal(failed.attackRollCount, 1);
+  const workflow = midiWorkflow(activity, attack());
+  activity.rollAttack = async () => [attack()];
+  state.random.push(11, 1); state.choices.push('retry');
+  await handleMidiAttack(workflow);
+  assert.equal(item.flags[MODULE_ID].jammed, true);
+  assert.equal(workflow.attackRollCount, 2);
+  assert.equal(state.random.length, 0);
+});
+
+test('Midi cancelled Kantreal remake retains the failed roll and its natural-fumble tracker', async () => {
+  const { state, activity } = fixture('kantreal');
+  const original = { options: {}, d20: { results: [{ result: 1 }] } };
+  const workflow = midiWorkflow(activity, original);
+  activity.rollAttack = async () => null;
+  state.random.push(11); state.choices.push('retry');
+  await handleMidiAttack(workflow);
+  assert.equal(workflow.attackRoll, original);
+  assert.equal(workflow.attackRollModifierTracker.fumble.get.natural, true);
+  assert.equal(workflow.attackRollCount, 1);
+});
+
+test('Midi Phobos miss survives suppressed chat creation and blocks or zeroes later damage batches', async () => {
+  const { state, activity } = fixture('phobos');
+  const workflow = { activity }, message = { create: false };
+  const config = { subject: activity, workflow, rolls: [] };
+  configureDamage(config, {}, message);
+  assert.equal(workflow[MODULE_ID].weaponUuid, activity.item.uuid);
+  assert.equal(workflow[MODULE_ID].pattern, 'phobos');
+  state.choices.push('0'); state.random.push(1);
+  const first = [additiveRoll()];
+  await evaluateDamage(async () => {}, first, config, message);
+  assert.equal(workflow[MODULE_ID].phobos.missed, true);
+  assert.equal(workflow[MODULE_ID].phobos.original[0].total, 12);
+  assert.equal(configureDamage({ ...config, subject: { type: 'damage' } }, {}, {}), false);
+  const later = [damage(7, 'fire'), damage(4, 'necrotic')];
+  await evaluateDamage(async () => {}, later, { workflow }, {});
+  assert.deepEqual(later.map(roll => roll.total), [0, 0]);
+});
+
+test('Midi damage conversion evidence remains on workflow when the core chat message is suppressed', async () => {
+  const { activity } = fixture('sunfury');
+  const workflow = { activity }, message = { create: false }, rolls = [damage(9)];
+  await evaluateDamage(async () => {}, rolls, { subject: activity, workflow }, message);
+  assert.equal(workflow[MODULE_ID].damageConversion.type, 'fire');
+  assert.equal(workflow[MODULE_ID].damageConversion.original[0].total, 9);
+  assert.deepEqual(rolls.map(roll => roll.total), [6, 3]);
 });

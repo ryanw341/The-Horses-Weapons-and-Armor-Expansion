@@ -10,7 +10,7 @@ Install using this manifest URL:
 https://raw.githubusercontent.com/ryanw341/The-Horses-Weapons-and-Armor-Expansion/main/module.json
 ```
 
-Requires **Foundry 14**, **D&D 5e 5.3.3 / 5.3.x**, and **libWrapper**. This release targets the core D&D 5e roll and damage workflows. D&D 5e 6.x and Midi-QOL workflows have not been verified; this module does not claim compatibility with them. Live Foundry visual and multiplayer testing remains necessary.
+Requires **Foundry 14**, **D&D 5e 5.3.3 / 5.3.x**, and **libWrapper**. Supports the core D&D 5e workflow and includes an optional **Midi-QOL 14.0.x** adapter checked against 14.0.9 source. D&D 5e 6.x is not supported. Live Foundry visual and multiplayer testing remains necessary.
 
 1. Enable the module and libWrapper, then reload the world.
 2. Open **Configure Settings > The Horse's Weapons and Armor Expansion > Configure tools and armor rules**.
@@ -34,6 +34,8 @@ Modified weapons gain a **Pattern actions** activity. Use this for maintenance, 
 
 When enabled, applying attributed critical attack damage through D&D 5e's damage tray adds **Damaged (N)** to the target's equipped body armor. Automatic degradation applies to player-owned **character** actors. Shields, clothing, and other equipment are excluded.
 
+With Midi-QOL 14.0.x, confirmed critical hits also damage armor when the attack workflow finishes, even if damage is zero or HP application is deferred. The active GM applies the item change, or an elected owner when no GM is connected. Damage parts, reapplying HP damage, and manual confirmation share one attack event and cannot add extra stacks. Undoing an HP change does not undo the confirmed hit or repair armor. Start a new attack with a new card for a separate hit.
+
 The effect is stored on the armor and reduces its prepared armor AC by one per stack. Its base AC is untouched. Unequipping it removes its contribution to the character's AC; equipping different armor uses that armor's condition. Damage remains with the item when copied or transferred.
 
 Without stacking, further critical hits do not add another penalty. Turning stacking off does not erase existing stacks. Turning degradation off stops new automatic damage; it does not repair existing damage.
@@ -49,7 +51,7 @@ All eleven ranged patterns and eleven melee patterns are included with their sup
 | Pattern | Implemented behavior and choices |
 | --- | --- |
 | Imperial | Removes pattern modifications. Existing jams/damage still require maintenance. |
-| Noctis, ranged | Attributed damage reducing a target to 0 HP makes it unconscious and clears newly applied death status. The GM still adjudicates unusual death mechanics and manually resolved damage. |
+| Noctis, ranged | Core attributed damage reducing a target to 0 HP makes it unconscious and clears newly applied death status. With Midi, a chat reminder asks the GM to confirm unconscious instead of dead after damage finishes. Midi's asynchronous NPC death automation can overwrite unconscious, so this release does not promise automatic non-lethal status with Midi. |
 | Kantreal | Natural 1 rolls a confirmation d20. Another 1 jams the weapon; a qualifying result offers a fresh attack roll. The GM chooses **10+ or 11+** in settings, default 11+. A retry uses the ordinary ammunition workflow. Mend the jam with one action. |
 | Lucius | Target an eligible recipient and use Pattern actions to request carryover damage. Enter the leftover damage and its type. The GM confirms the kill, direction/flanking, recipient, and any split damage types. Allies can receive it. |
 | Accatran | Weight is halved. With **Equipment Limits 0.3.2+**, equipment cost changes 2 to 1 or 1 to 0.5; already-half-slot weapons remain 0.5. A natural 1 unequips the weapon and announces it was dropped; place it on the map manually. |
@@ -64,7 +66,7 @@ All eleven ranged patterns and eleven melee patterns are included with their sup
 | Magnacore, melee | After confirming a hit, declare a reaction and request ignition. The target owner/GM chooses prone or 1d6 fire damage. Natural 1 uses the same overheat choice as Sunfury. |
 | Umbra-Ferrox, melee | After confirming a critical hit, request blindness. The module removes its own blinded effect after the target's next turn ends; outside combat it requires manual removal. While equipped, darkvision sense range becomes zero and standard Foundry darkvision is suppressed without rewriting token settings. Custom vision modules/modes need separate verification. |
 | Mercurian, melee | Adds Thrown with 30/60-foot range. A thrown natural 1 marks it damaged and blocks further attacks until 10 minutes with proficient Weapon Tools are confirmed. |
-| Tsun-Jin, melee | Lowers the weapon's effective critical threshold by one. Attacks targeting exactly one creature with an equipped Tsun-Jin weapon also lower their threshold by one. Different defenders with different thresholds must be resolved separately. |
+| Tsun-Jin, melee | Sets the weapon's critical threshold to 19 without stacking with Champion or other expanded critical ranges. An existing 19 stays 19; 18 or lower stays as it is. Its separate drawback lowers an attacker's threshold by one when targeting exactly one creature with an equipped Tsun-Jin weapon. Different defenders with different thresholds must be resolved separately. |
 
 Target effects create a reviewable chat request. The active GM resolves it, or an active owner when no GM is connected. The module does not silently edit creatures the acting player does not own. Request and armor event IDs prevent repeat applications.
 
@@ -72,11 +74,17 @@ Target effects create a reviewable chat request. The active GM resolves it, or a
 
 **Action economy:** action, bonus action, reaction, repair time, and available burst attacks are player declarations recorded by the controls. The module does not infer Extra Attack, Action Surge, Haste, or reactions from individual attack rolls. A shared burst roll is not an automatic multiattack workflow.
 
+## Midi-QOL behavior
+
+The optional adapter starts automatically with Midi-QOL 14.0.x. Kantreal resolves its confirmation before Midi checks hits and replaces that workflow's attack on a successful retry. Phobos marks a rerolled 1 as a miss, clears normal/bonus/other damage, and prevents critical armor damage. Damage conversions and reroll evidence are retained on the Midi card even when core damage cards are hidden.
+
+Midi can execute external `isHit` macros before damage is rolled. A later Phobos miss cannot reverse effects those macros already applied; the GM must undo those separately. Automatic range/proximity disadvantage imposed by Midi or another module is not removed by the declared attack-condition controls. Resolve those causes explicitly for Kalibrax, Mezoa, Scoped Triplex, and Vortannis, retaining unrelated disadvantage. Noctis requires the GM status check described above. Lucius, reaction choices, action costs, and Burst remain assisted as listed in the pattern table.
+
 ## Compatibility and validation
 
 The Horse's Equip Messages continues to see normal equip changes. Paper Doll Sync continues to display one item per square and fill overflow. Equipment Limits 0.3.2 includes the required Accatran cost integration, including blocking a pattern change that would newly exceed capacity in block mode.
 
-Automated tests cover rule calculations, reversible item effects, source UUIDs/proficiency, menu actions, critical attribution, damage conversion, repair batching, ownership, and turn expiration. API contracts were checked against the official D&D 5e 5.3.3 source and Foundry 14 APIs. Tests simulate Foundry documents; they do not replace a live world test.
+Automated tests cover rule calculations, reversible item effects, source UUIDs/proficiency, menu actions, critical attribution, damage conversion, repair batching, ownership, turn expiration, and Midi workflow attribution/deduplication. API contracts were checked against the official D&D 5e 5.3.3 source, Foundry 14 APIs, and [Midi-QOL 14.0.9 source](https://gitlab.com/tposney/midi-qol/-/tree/v14.0.9/src/module). Tests simulate Foundry documents; they do not replace a live world test.
 
 With Node.js 22+ and Python 3:
 

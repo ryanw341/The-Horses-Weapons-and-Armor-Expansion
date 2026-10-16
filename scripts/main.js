@@ -6,6 +6,7 @@ import { registerEffects, refreshDerivedState } from './effects.js';
 import { registerTargetActions, confirmCriticalArmor } from './target-actions.js';
 import { openWeaponTools, openArmorTools, openPatternActions } from './workbench.js';
 import { cleanupRuntime } from './shared.js';
+import { registerMidi } from './midi.js';
 
 export function preflight() {
   if (game.system.id !== 'dnd5e') throw new Error("The Horse's Weapons and Armor Expansion requires D&D 5e.");
@@ -29,6 +30,7 @@ Hooks.once('ready', () => {
     preflight();
     registerEffects();
     registerCombat();
+    registerMidi();
     registerTargetActions();
     refreshDerivedState();
     registerTools({ openWeaponTools, openArmorTools, openPatternActions });

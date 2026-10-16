@@ -317,3 +317,28 @@ test('non-critical and non-attack cards cannot open the armor confirmation', asy
   message.rolls[0].isCritical = true; message.flags.dnd5e.roll.type = 'damage'; await confirmCriticalArmor(message);
   assert.equal(state.dialogs.length, 0);
 });
+
+test('Phobos misses cannot confirm armor damage, including a reroll while the confirmation is open', async () => {
+  const { target, armor, state } = fixture(), worn = armor();
+  const message = criticalMessage([{ uuid: target.uuid }]);
+  await confirmCriticalArmor(message);
+  message.flags[MODULE_ID] = { phobos: { missed: true } };
+  await assert.rejects(state.dialogs[0].buttons[0].callback({}, { form: selectedForm(0) }), /Phobos made this attack miss/);
+  await assert.rejects(confirmCriticalArmor(message), /Phobos made this attack miss/);
+  assert.equal(worn.updates.length, 0);
+});
+
+test('Midi critical cards offer manual confirmation for their hit tokens with a shared event identity', async () => {
+  const { target, armor, state, source } = fixture(), worn = armor();
+  game.modules.set('midi-qol', { active: true, version: '14.0.9' });
+  const token = { documentName: 'Token', uuid: 'Scene.scene.Token.target', actor: target };
+  state.documents.set(token.uuid, token);
+  const message = criticalMessage([]);
+  message.flags.dnd5e.roll.type = 'midi'; message.rolls = [];
+  message.flags['midi-qol'] = { isCritical: true, hitTargetUuids: [token.uuid] };
+  message.getAssociatedActivity = () => ({ type: 'attack', item: source });
+  game.user.targets.clear();
+  await confirmCriticalArmor(message);
+  await state.dialogs[0].buttons[0].callback({}, { form: selectedForm(0) });
+  assert.deepEqual(armorDamageState(worn).events, [`${message.uuid}:${target.uuid}`]);
+});

@@ -2,9 +2,11 @@
 import { MODULE_ID, kantrealOutcome } from './rules.js';
 import { on, getConfig, announce, choose, esc, run, ownedItem } from './shared.js';
 import { damageArmor, equippedArmor } from './armor.js';
+import { midiDamageContext } from './midi-context.js';
 
 const queues = new Map();
 const handledAttacks = new Set();
+const handledMidiAttacks = new WeakSet();
 const damageSnapshots = new WeakMap();
 const thresholdState = new WeakMap();
 const damageType = roll => roll?.options?.type ?? '';
@@ -41,6 +43,12 @@ function setMessageFlag(message, key, value) {
 function appendFlavor(message, text) {
   message.data ??= {};
   message.data.flavor = `${message.data.flavor ?? ''}<p class="horse-pattern-note">${esc(text)}</p>`;
+}
+
+function retainMidiMetadata(config, message) {
+  if (!config.workflow) return;
+  config.workflow[MODULE_ID] = { ...(config.workflow[MODULE_ID] ?? {}),
+    ...(message.data?.flags?.[MODULE_ID] ?? {}) };
 }
 
 function rollSnapshot(roll) {
@@ -156,6 +164,13 @@ async function applyPhobos(rolls, item, message) {
 /** libWrapper WRAPPER: await evaluated dice, then finish before dnd5e posts their chat message. */
 export async function evaluateDamage(wrapped, rolls, config = {}, message = {}) {
   const result = await wrapped(rolls, config, message);
+  // Midi does not create the normal damage message. Retain the result on its
+  // workflow, including a miss that must suppress later bonus/other damage.
+  if (config.workflow?.[MODULE_ID]?.phobos?.missed && rolls.length && config.evaluate !== false) {
+    const zeros = await Promise.all(rolls.map(roll => fixedDamageRoll(roll, 0)));
+    rolls.splice(0, rolls.length, ...zeros);
+    return result;
+  }
   const item = weaponFor(config.subject);
   if (!item?.isOwner || !rolls.length || config.evaluate === false) return result;
   return serialized(item.uuid, async () => {
@@ -174,6 +189,7 @@ export async function evaluateDamage(wrapped, rolls, config = {}, message = {}) 
         appendFlavor(message, `${state.pattern === 'sunfury' ? 'Sunfury' : 'Triplex Energized'}: the first up to 3 damage points are ${type}; total damage is unchanged. Original: ${original.map(roll => `${roll.formula} = ${roll.total} ${roll.type}`).join('; ')}.`);
       }
     }
+    retainMidiMetadata(config, message);
     return result;
   });
 }
@@ -184,12 +200,14 @@ export function blockedWeapon(item) {
     : state.mercurianDamaged ? 'Repair this weapon for 10 minutes with Weapon Tools before using it.' : null;
 }
 
-export function guardAttack(config) {
+export function guardAttack(config, _dialog, message) {
+  if (message && config.workflow?.itemCardUuid) setMessageFlag(message, 'midiAttackMessage', config.workflow.itemCardUuid);
   const item = weaponFor(config?.subject);
   const reason = blockedWeapon(item);
   if (reason) { ui.notifications.warn(reason); return false; }
-  const targets = [...(game.user.targets ?? [])].map(target => target.actor).filter(Boolean);
-  const state = flagsOf(item), conditions = state.nextAttack;
+  const targets = config[MODULE_ID]?.targets
+    ?? [...(config.workflow?.targets ?? game.user.targets ?? [])].map(target => target.actor).filter(Boolean);
+  const state = flagsOf(item), conditions = config[MODULE_ID]?.conditions ?? state.nextAttack;
   const scoped = state.pattern === 'triplex' && state.triplexMode === 'scoped' && !state.modesLocked;
   const causes = [];
   if (conditions?.longRange && !scoped) causes.push('long range');
@@ -210,7 +228,8 @@ function guardUse(activity) {
 
 export function effectiveThreshold(threshold, attackingTsunJin, targetTsunJin) {
   const base = Number.isFinite(threshold) ? Math.min(20, threshold) : 20;
-  return Math.max(2, base - Number(Boolean(attackingTsunJin)) - Number(Boolean(targetTsunJin)));
+  const weapon = attackingTsunJin ? Math.min(base, 19) : base;
+  return Math.max(2, weapon - Number(Boolean(targetTsunJin)));
 }
 
 export function configureAttack(config, rollConfig) {
@@ -222,7 +241,8 @@ export function configureAttack(config, rollConfig) {
   rollConfig.options ??= {};
   const context = config[MODULE_ID];
   if (context) {
-    rollConfig.options[MODULE_ID] = { nextAttack: context.conditions, pattern: context.pattern, mode: context.mode };
+    rollConfig.options[MODULE_ID] = { nextAttack: context.conditions, pattern: context.pattern, mode: context.mode,
+      midiWorkflow: Boolean(config.workflow || context.midiRetry) };
     if (context.scoped) {
       rollConfig.parts ??= [];
       if (!rollConfig.parts.includes('@horseScopedPenalty')) rollConfig.parts.push('@horseScopedPenalty');
@@ -241,6 +261,8 @@ export function configureAttack(config, rollConfig) {
 }
 
 export function configureDamage(config, _dialog, message = {}) {
+  if (config.workflow?.itemCardUuid) setMessageFlag(message, 'midiAttackMessage', config.workflow.itemCardUuid);
+  if (config.workflow?.[MODULE_ID]?.phobos?.missed) return false;
   const item = weaponFor(config.subject);
   if (!item) return;
   const reason = blockedWeapon(item);
@@ -253,6 +275,7 @@ export function configureDamage(config, _dialog, message = {}) {
   const attack = linkedAttackMessage({ flags: { dnd5e: { originatingMessage: originId } },
     getAssociatedActivity: () => config.subject });
   if (attack) setMessageFlag(message, 'attackMessage', attack.uuid ?? attack.id);
+  retainMidiMetadata(config, message);
   if (flagsOf(item).pattern === 'mars' && !config.rolls.some(roll => roll.options?.[MODULE_ID]?.mars)) {
     config.rolls.push({ parts: ['1'], data: {}, options: { type: 'necrotic', isCritical: false,
       critical: { multiplier: 1, multiplyNumeric: false, powerfulCritical: false, bonusDice: 0, bonusDamage: '' },
@@ -272,9 +295,12 @@ async function dropWeapon(item, reason) {
   await announce(item.actor, `<p>${esc(item.name)} ${esc(reason)}. It is unequipped; mark its position on the scene.</p>`);
 }
 
-async function handleAttack(rolls, { subject } = {}) {
+async function handleAttack(rolls, { subject } = {}, { retry, midi = false } = {}) {
   const item = weaponFor(subject);
   if (!item?.isOwner || !rolls?.length) return;
+  // Core's postRollAttack hook is synchronous and supplies only the subject.
+  // Midi's awaited preCheckHits hook owns the corresponding attack instead.
+  if (!midi && rolls[0].options?.[MODULE_ID]?.midiWorkflow) return;
   const key = rolls[0].parent?.uuid ?? rolls[0].parent?.id;
   if (remember(handledAttacks, key)) return;
   const roll = rolls[0];
@@ -300,8 +326,10 @@ async function handleAttack(rolls, { subject } = {}) {
         [{ action: 'retry', label: 'Remake attack' }, { action: 'keep', label: 'Keep failure' }]);
       if (choice === 'retry') {
         const activity = item.system.activities?.get(subject.id);
-        if (activity && !blockedWeapon(item)) await activity.rollAttack({ attackMode: roll.options?.attackMode,
-          ammunition: roll.options?.ammunition });
+        if (activity && !blockedWeapon(item)) {
+          if (retry) await retry(roll);
+          else await activity.rollAttack({ attackMode: roll.options?.attackMode, ammunition: roll.options?.ammunition });
+        }
       }
     } else await announce(item.actor, `<p>Kantreal confirmation: the critical failure stands.</p>`);
   } else if (state.pattern === 'accatran') await dropWeapon(item, 'flies out of your hands');
@@ -320,6 +348,41 @@ async function handleAttack(rolls, { subject } = {}) {
   } else if (state.pattern === 'mercurian' && roll.options?.attackMode?.startsWith('thrown')) {
     await item.update({ [`flags.${MODULE_ID}.mercurianDamaged`]: true });
     await announce(item.actor, `<p>${esc(item.name)} is damaged. Repair it for 10 minutes with Weapon Tools before using it.</p>`);
+  }
+}
+
+/** Midi 14.0.9 awaits preCheckHits before processing the final attack and damage. */
+export async function handleMidiAttack(workflow) {
+  if (!workflow?.attackRoll || !weaponFor(workflow.activity)?.isOwner) return;
+  while (workflow.attackRoll && !handledMidiAttacks.has(workflow.attackRoll)) {
+    const original = workflow.attackRoll;
+    handledMidiAttacks.add(original);
+    await handleAttack([original], { subject: workflow.activity }, { midi: true, retry: async roll => {
+      const tracker = workflow.attackRollModifierTracker;
+      if (typeof workflow.setAttackRoll !== 'function' || !tracker?.critical?.get || !tracker?.fumble?.get
+        || typeof tracker.critical.restore !== 'function' || typeof tracker.fumble.restore !== 'function') {
+        throw new Error('This Midi-QOL version cannot safely replace the Kantreal attack. Remake the attack after this workflow completes.');
+      }
+      // Midi 14.0.9 ignores updateWorkflow:false for attacks. Omitting workflow
+      // deliberately selects its core rollAttack fallback, which still consumes
+      // ammunition. Never recursively resume or create another Midi workflow.
+      const used = roll.options?.[MODULE_ID];
+      const rolls = await workflow.activity.rollAttack({
+        attackMode: roll.options?.attackMode, ammunition: roll.options?.ammunition,
+        advantage: Boolean(tracker.hasAdvantage), disadvantage: Boolean(tracker.hasDisadvantage),
+        [MODULE_ID]: { midiRetry: true, conditions: used?.nextAttack ?? null,
+          targets: [...(workflow.targets ?? [])].map(target => target.actor).filter(Boolean) }
+      }, {}, { create: false });
+      if (!rolls?.[0]) return;
+      rolls[0].options ??= {};
+      rolls[0].options[MODULE_ID] = { ...(rolls[0].options[MODULE_ID] ?? {}), midiWorkflow: true };
+      // processAttackRoll sets natural=true when appropriate but never clears a
+      // previous natural failure. Keep unrelated forced/suppressed states.
+      for (const name of ['critical', 'fumble']) tracker[name].restore({ ...tracker[name].get, natural: false });
+      await workflow.setAttackRoll(rolls[0]);
+      workflow.attackRollCount = (workflow.attackRollCount ?? 1) + 1;
+    } });
+    if (workflow.attackRoll === original || workflow.aborted) break;
   }
 }
 
@@ -355,6 +418,8 @@ function linkedAttackMessage(message) {
 }
 
 export function criticalEventId(message, actor) {
+  const midiOrigin = message?.flags?.[MODULE_ID]?.midiAttackMessage;
+  if (typeof midiOrigin === 'string' && midiOrigin.startsWith('ChatMessage.') && actor?.uuid) return `${midiOrigin}:${actor.uuid}`;
   const attack = linkedAttackMessage(message) ?? message;
   const uuid = attack?.uuid ?? attack?.id;
   return uuid && actor?.uuid ? `${uuid}:${actor.uuid}` : null;
@@ -368,13 +433,37 @@ export function isCriticalAttackDamage(message, options = {}, amount = 0) {
     && !['healing', 'temphp'].includes(damageType(roll)));
 }
 
-function beforeDamage(actor, amount, _updates, options) {
+function beforeDamage(actor, amount, updates, options) {
+  const hp = actor.system?.attributes?.hp;
+  const nextHp = updates?.['system.attributes.hp.value'] ?? updates?.system?.attributes?.hp?.value ?? hp?.value;
+  const nextTemp = updates?.['system.attributes.hp.temp'] ?? updates?.system?.attributes?.hp?.temp ?? hp?.temp ?? 0;
   if (options && typeof options === 'object') damageSnapshots.set(options, {
-    hp: actor.system?.attributes?.hp?.value, dead: actor.statuses?.has('dead'), actor: actor.uuid, amount
+    hp: hp?.value, temp: hp?.temp ?? 0, dead: actor.statuses?.has('dead'), actor: actor.uuid, amount,
+    decreases: nextHp < hp?.value || nextTemp < (hp?.temp ?? 0),
+    increases: nextHp > hp?.value || nextTemp > (hp?.temp ?? 0)
   });
 }
 
 export async function afterDamage(actor, amount, options = {}) {
+  const midi = midiDamageContext(actor, options);
+  const prior = damageSnapshots.get(options);
+  // Midi's reapply buttons use inconsistent amount signs. Read the actual HP
+  // direction captured before the write, and never mistake Undo for a new hit.
+  if (options?.midi) {
+    if (!actor?.isOwner || !midi || !prior || prior.actor !== actor.uuid || prior.increases) return;
+    if (getConfig().armorDegradation && actor.type === 'character' && actor.hasPlayerOwner === true
+      && midi.critical && options.midi.isCritical === true && prior.decreases) {
+      const armor = itemsOf(actor).find(item => item.uuid === midi.armorUuid);
+      if (armor) await damageArmor(armor, { stacking: getConfig().stackArmorDamage === true,
+        eventId: midi.eventId, origin: actor.uuid });
+    }
+    if (midi.pattern === 'noctis' && prior.decreases && prior.hp > 0 && actor.system?.attributes?.hp?.value === 0) {
+      // Midi's asynchronous NPC death processing can overwrite unconscious.
+      // Explicitly request adjudication instead of claiming this race is fixed.
+      await announce(actor, `<p>${esc(actor.name)} was reduced to 0 HP by a Noctis weapon. This is non-lethal: the GM must confirm unconscious instead of dead after Midi finishes applying damage.</p>`);
+    }
+    return;
+  }
   const message = damageMessage(options);
   const activity = attributedAttack(message);
   if (!actor?.isOwner || !activity || amount < 0 || options.only === 'healing'
@@ -388,7 +477,6 @@ export async function afterDamage(actor, amount, options = {}) {
     }
   }
   const appliedPattern = message.flags?.[MODULE_ID]?.pattern ?? flagsOf(activity.item).pattern;
-  const prior = damageSnapshots.get(options);
   if (appliedPattern === 'noctis' && amount > 0 && prior?.actor === actor.uuid && prior.hp > 0
     && actor.system?.attributes?.hp?.value === 0 && typeof actor.toggleStatusEffect === 'function') {
     await actor.toggleStatusEffect('unconscious', { active: true });

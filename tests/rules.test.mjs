@@ -69,9 +69,10 @@ test('Mercurian adds thrown once and restores the original properties when remov
   assert.deepEqual(applyPatternModifiers(original, 'imperial').properties, ['hvy', 'two']);
 });
 
-test('Tsun-Jin improves existing critical thresholds and never makes natural 1 critical', () => {
+test('Tsun-Jin grants 19 without stacking with Champion and preserves lower thresholds', () => {
   assert.equal(applyPatternModifiers(baseline(), 'tsun-jin').criticalThreshold, 19);
-  assert.equal(applyPatternModifiers({ criticalThreshold: 19 }, 'tsun-jin').criticalThreshold, 18);
+  assert.equal(applyPatternModifiers({ criticalThreshold: 19 }, 'tsun-jin').criticalThreshold, 19);
+  assert.equal(applyPatternModifiers({ criticalThreshold: 18 }, 'tsun-jin').criticalThreshold, 18);
   assert.equal(applyPatternModifiers({ criticalThreshold: null }, 'tsun-jin').criticalThreshold, 19);
   assert.equal(applyPatternModifiers({ criticalThreshold: 2 }, 'tsun-jin').criticalThreshold, 2);
 });

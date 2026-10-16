@@ -2,6 +2,7 @@ import { MODULE_ID } from './rules.js';
 import { currentPattern } from './patterns.js';
 import { damageArmor, equippedArmor } from './armor.js';
 import { criticalEventId } from './combat.js';
+import { midiEnabled } from './midi-context.js';
 import { on, esc, formDialog, choose, announce, getConfig, isWriter, inventories, run } from './shared.js';
 
 function oneTarget() {
@@ -195,10 +196,19 @@ export async function resolveRequest(message) {
   } finally { resolving.delete(key); }
 }
 
+export function criticalArmorCard(message) {
+  return message?.getFlag('dnd5e', 'roll.type') === 'attack' && message.rolls?.some(roll => roll.isCritical)
+    || midiEnabled() && message?.flags?.['midi-qol']?.isCritical === true
+      && message.getAssociatedActivity?.()?.type === 'attack';
+}
+
 export async function confirmCriticalArmor(message) {
-  if (!getConfig().armorDegradation || message.getFlag('dnd5e', 'roll.type') !== 'attack'
-    || !message.rolls?.some(roll => roll.isCritical)) return;
-  const savedTargets = message.getFlag('dnd5e', 'targets');
+  const originUuid = message.flags?.[MODULE_ID]?.midiAttackMessage;
+  const origin = typeof originUuid === 'string' ? globalThis.fromUuidSync?.(originUuid) ?? message : message;
+  if (origin.flags?.[MODULE_ID]?.phobos?.missed) throw new Error('Phobos made this attack miss. It cannot damage armor.');
+  if (!getConfig().armorDegradation || !criticalArmorCard(message)) return;
+  const savedTargets = midiEnabled() && Array.isArray(message.flags?.['midi-qol']?.hitTargetUuids)
+    ? message.flags['midi-qol'].hitTargetUuids.map(uuid => ({ uuid })) : message.getFlag('dnd5e', 'targets');
   const descriptors = Array.isArray(savedTargets) ? savedTargets : [];
   const targets = [];
   for (const entry of descriptors) {
@@ -217,6 +227,7 @@ export async function confirmCriticalArmor(message) {
   return formDialog('Confirm critical hit', `<p>Select characters actually hit by this critical attack. Resolve any Phobos reroll first. This also handles immune targets or damage resolved outside Foundry's damage tray.</p>
     ${unique.map((actor, index) => `<label><input type="checkbox" name="target" value="${index}"> ${esc(actor.name)} (${esc(equippedArmor(actor).name)})</label>`).join('')}`, [
     { action: 'damage', label: 'Damage selected armor', callback: async (event, button) => {
+      if (origin.flags?.[MODULE_ID]?.phobos?.missed) throw new Error('Phobos made this attack miss. It cannot damage armor.');
       if (!getConfig().armorDegradation) throw new Error('Armor degradation is now disabled.');
       const selected = [...button.form.querySelectorAll('input[name=target]:checked')].map(input => unique[Number(input.value)]);
       if (!selected.length || selected.some(actor => !actor)) throw new Error('Select a listed character actually hit by the critical attack.');
@@ -246,7 +257,7 @@ export function registerTargetActions() {
     if (message.getFlag(MODULE_ID, 'request') && !message.getFlag(MODULE_ID, 'resolved')) {
       add('Resolve pattern effect (active GM / owner if no GM)', () => resolveRequest(message), 'hwa-resolve-target');
     }
-    if (getConfig().armorDegradation && message.getFlag('dnd5e', 'roll.type') === 'attack' && message.rolls?.some(roll => roll.isCritical)) {
+    if (getConfig().armorDegradation && criticalArmorCard(message) && !message.flags?.[MODULE_ID]?.phobos?.missed) {
       add('Confirm critical hit: damage armor', () => confirmCriticalArmor(message), 'hwa-confirm-armor');
     }
   });
