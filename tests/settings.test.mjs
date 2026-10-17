@@ -6,7 +6,7 @@ import { validateTools, toolDropListeners, openSettings, registerSettings } from
 
 function fixture() {
   const state = { config: defaults(), resolved: [], registered: new Map(), menus: new Map(), dialogs: [],
-    warnings: [], notices: [], saves: [], hooks: [], documents: new Map() };
+    warnings: [], notices: [], saves: [], hooks: [], documents: new Map(), rendered: [], listeners: [] };
   globalThis.game = { user: { isGM: true }, ready: true, items: [], settings: {
     get: () => state.config,
     set: async (scope, key, value) => { state.saves.push(value); state.config = value; },
@@ -16,8 +16,32 @@ function fixture() {
   globalThis.ui = { notifications: { warn: text => state.warnings.push(text), info: text => state.notices.push(text) } };
   globalThis.Hooks = { callAll: name => state.hooks.push(name) };
   globalThis.foundry = { applications: { api: { DialogV2: class {
-    static async wait(options) { state.dialogs.push(options); return options; }
+    constructor(options = {}) {
+      // Foundry validates this before SettingsConfig can call render(true).
+      if (!options.buttons?.length) throw new Error('You must define at least one entry in config.buttons');
+      this.options = options;
+      this.buttons = options.buttons.map(button => ({ dataset: { action: button.action }, disabled: false }));
+      this.element = { querySelectorAll: selector => selector === '.form-footer button[data-action]' ? this.buttons
+        : selector === '[data-tool-field]' ? [{
+        querySelector: selector => selector === 'input' ? { value: '' }
+          : { addEventListener: name => state.listeners.push(name) },
+        addEventListener: name => state.listeners.push(name)
+      }] : [] };
+    }
+    static async wait(options) { const dialog = new this(options); state.dialogs.push(dialog.options); return dialog.options; }
+    async render(options) { state.rendered.push(this); await this._onRender({}, options); return this; }
     async _onRender() {}
+    async _onSubmit(target, event) {
+      event.preventDefault();
+      const prior = this.buttons.map(button => [button, button.disabled]);
+      for (const button of this.buttons) button.disabled = true;
+      const button = this.options.buttons.find(button => button.action === target.dataset.action);
+      await button.callback?.(event, target, this);
+      // This intentionally matches Foundry 14: no finally on callback failure.
+      for (const [button, disabled] of prior) button.disabled = disabled;
+      this.closed = true;
+      return this;
+    }
   } } } };
   globalThis.fromUuid = async uuid => { state.resolved.push(uuid); return state.documents.get(uuid); };
   return state;
@@ -106,6 +130,59 @@ test('settings registration is world-scoped with a restricted menu and migration
   assert.equal(getConfig().armorDegradation, false);
   state.registered.get('rules').onChange();
   assert.deepEqual(state.hooks, [`${MODULE_ID}.syncTools`]);
+});
+
+test('the registered menu constructs without arguments and renders the actual tools form', async () => {
+  const state = fixture(); registerSettings();
+  const Menu = state.menus.get('configure').type;
+  // Match SettingsConfig's click handler, rather than bypassing it via openSettings.
+  const menu = new Menu();
+  const rendered = await menu.render(true);
+  assert.equal(rendered, menu);
+  assert.deepEqual(state.rendered, [menu]);
+  assert.match(menu.options.content, /name="weaponToolsUuid"/);
+  assert.match(menu.options.content, /name="armorToolsUuid"/);
+  assert.deepEqual(menu.options.buttons.map(button => button.action), ['save', 'cancel']);
+  assert.deepEqual(state.listeners.sort(), ['change', 'dragover', 'drop']);
+  assert.equal(state.dialogs.length, 0, 'The menu itself is the dialog, not a second launcher window');
+});
+
+test('saving through the registered menu validates and persists the selected tools and armor rules', async () => {
+  const state = fixture(); registerSettings();
+  state.documents.set('Item.tool', { documentName: 'Item', type: 'tool' });
+  const menu = new (state.menus.get('configure').type)();
+  await menu.render(true);
+  const save = menu.options.buttons.find(button => button.action === 'save');
+  await save.callback({}, { form: form({ weaponToolsUuid: 'Item.tool', armorToolsUuid: 'Item.tool', armorDegradation: true }) });
+  assert.equal(state.saves.length, 1);
+  assert.equal(state.saves[0].weaponToolsUuid, 'Item.tool');
+  assert.equal(state.saves[0].armorToolsUuid, 'Item.tool');
+  assert.equal(state.saves[0].armorDegradation, true);
+  assert.deepEqual(state.hooks, [`${MODULE_ID}.syncTools`]);
+  game.user.isGM = false;
+  await assert.rejects(save.callback({}, { form: form() }), /Only a GM/);
+  assert.equal(state.saves.length, 1);
+});
+
+test('an invalid tool UUID leaves the registered form open and usable for correction', async t => {
+  t.mock.method(console, 'error', () => {});
+  const state = fixture(); registerSettings();
+  const menu = new (state.menus.get('configure').type)();
+  await menu.render(true);
+  const button = menu.buttons.find(button => button.dataset.action === 'save');
+  button.form = form({ weaponToolsUuid: 'Item.missing' });
+  const event = { preventDefault() {} };
+  await menu._onSubmit(button, event);
+  assert.equal(state.saves.length, 0);
+  assert.match(state.warnings[0], /accessible Tool item UUID/);
+  assert.equal(menu.closed, undefined);
+  assert.equal(menu.buttons.every(button => !button.disabled), true);
+  state.documents.set('Item.tool', { documentName: 'Item', type: 'tool' });
+  button.form = form({ weaponToolsUuid: 'Item.tool' });
+  await menu._onSubmit(button, event);
+  assert.equal(state.saves.length, 1);
+  assert.equal(state.saves[0].weaponToolsUuid, 'Item.tool');
+  assert.equal(menu.closed, true);
 });
 
 test('drag/drop and the world-item picker populate UUID fields without accepting unrelated drag data', () => {

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2
+
+- Fix the Configure tools and armor rules button failing before its window opens. The registered settings dialog now supplies its content and buttons during construction, as Foundry 14 requires.
+- Keep the settings form open and restore its buttons after invalid tool UUIDs or failed saves, so the GM can correct and resubmit.
+- Add regression coverage for Foundry's actual registered-menu construction/render path, saving, drag/drop listener attachment, and validation recovery.
+
 ## 0.1.1
 
 - Add an optional Midi-QOL 14.0.x adapter, checked against the 14.0.9 source, for confirmed critical hits and attributed damage application.

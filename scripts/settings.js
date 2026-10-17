@@ -1,5 +1,5 @@
 import { MODULE_ID, canonicalUuid } from './rules.js';
-import { defaults, getConfig, esc, formDialog, run } from './shared.js';
+import { defaults, getConfig, esc, formDialog, report } from './shared.js';
 
 export async function validateTools(form) {
   const read = name => form.elements.namedItem(name);
@@ -32,7 +32,7 @@ export function toolDropListeners(element) {
   }
 }
 
-export function openSettings() {
+function settingsDialogOptions() {
   if (!game.user.isGM) throw new Error('Only a GM can configure these rules.');
   const config = getConfig();
   const tools = [...game.items].filter(item => item.type === 'tool').sort((a, b) => a.name.localeCompare(b.name));
@@ -47,7 +47,7 @@ export function openSettings() {
     <label><input type="checkbox" name="repairRequiresProficiency"${config.repairRequiresProficiency ? ' checked' : ''}> Require armor-tool proficiency for repairs</label>
     <label>Kantreal confirmation roll needed to retry<select name="kantrealMinimum"><option value="11"${config.kantrealMinimum === 11 ? ' selected' : ''}>11 or higher</option><option value="10"${config.kantrealMinimum === 10 ? ' selected' : ''}>10 or higher</option></select></label>
     <p>Weapon modification always requires proficiency. Repair completion confirms that the character spent the stated time; it does not advance the world's clock.</p></div>`;
-  return formDialog("The Horse's Weapons and Armor Expansion", content, [
+  return { window: { title: "The Horse's Weapons and Armor Expansion" }, position: { width: 620 }, content, buttons: [
     { action: 'save', label: 'Save changes', default: true, callback: async (event, button) => {
       if (!game.user.isGM) throw new Error('Only a GM can change these settings.');
       await game.settings.set(MODULE_ID, 'rules', await validateTools(button.form));
@@ -55,14 +55,43 @@ export function openSettings() {
       ui.notifications.info('Saved. Matching inventory tools are being updated with their new actions.');
     } },
     { action: 'cancel', label: 'Cancel' }
-  ], { onRender: toolDropListeners });
+  ] };
+}
+
+export function openSettings() {
+  const { window, position, content, buttons } = settingsDialogOptions();
+  return formDialog(window.title, content, buttons, { width: position.width, onRender: toolDropListeners });
 }
 
 export function registerSettings() {
   game.settings.register(MODULE_ID, 'rules', { name: 'Expansion rules', scope: 'world', config: false, type: Object,
     default: defaults(), onChange: () => { if (game.ready) Hooks.callAll(`${MODULE_ID}.syncTools`); } });
   class ConfigMenu extends foundry.applications.api.DialogV2 {
-    render() { run(openSettings()); return this; }
+    constructor(options = {}) {
+      // SettingsConfig constructs menus with no arguments. DialogV2 validates
+      // its buttons in the constructor, before render can open anything.
+      super({ ...options, ...settingsDialogOptions() });
+    }
+
+    async _onRender(context, options) {
+      await super._onRender(context, options);
+      toolDropListeners(this.element);
+    }
+
+    async _onSubmit(target, event) {
+      const buttons = Array.from(this.element.querySelectorAll('.form-footer button[data-action]'),
+        button => [button, button.disabled]);
+      try {
+        return await super._onSubmit(target, event);
+      } catch (error) {
+        // Foundry disables dialog buttons before calling the save callback.
+        // A failed UUID validation must leave this form editable for a retry.
+        report(error);
+        return this;
+      } finally {
+        for (const [button, disabled] of buttons) button.disabled = disabled;
+      }
+    }
   }
   game.settings.registerMenu(MODULE_ID, 'configure', { name: "The Horse's Weapons and Armor Expansion",
     label: 'Configure tools and armor rules', hint: 'Link your Weapon Tools and Armor Tools; configure degradation and stacking.',

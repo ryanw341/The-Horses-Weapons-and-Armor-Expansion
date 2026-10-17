@@ -2,7 +2,7 @@
   "id": "the-horses-weapons-and-armor-expansion",
   "title": "The Horse's Weapons and Armor Expansion",
   "description": "Proficient tool crafting, weapon patterns, and item-based armor degradation for D&D 5e.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "authors": [{ "name": "The Horse" }],
   "compatibility": { "minimum": "14" },
   "esmodules": ["scripts/main.js"],
@@ -13,5 +13,5 @@
   },
   "url": "https://github.com/ryanw341/The-Horses-Weapons-and-Armor-Expansion",
   "manifest": "https://raw.githubusercontent.com/ryanw341/The-Horses-Weapons-and-Armor-Expansion/main/module.json",
-  "download": "https://github.com/ryanw341/The-Horses-Weapons-and-Armor-Expansion/releases/download/v0.1.1/the-horses-weapons-and-armor-expansion-0.1.1.zip"
+  "download": "https://github.com/ryanw341/The-Horses-Weapons-and-Armor-Expansion/releases/download/v0.1.2/the-horses-weapons-and-armor-expansion-0.1.2.zip"
 }
